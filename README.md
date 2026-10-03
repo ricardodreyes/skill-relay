@@ -17,15 +17,11 @@ Skip a skill by putting its folder name on a line in `~/.claude/skills/.relayign
 
 ## How Claude picks a skill
 
-Claude Code shows the model every skill's name and description, and the model loads one when the task matches. Skill Relay copies that. The server exposes three tools:
+Claude Code shows the model every skill's name and description, and the model loads one when the task matches. Skill Relay copies that by making each skill its own MCP tool. The tool's name is the skill's name (`seo-audit`, `copywriting`), and its description is the skill's description. When you ask claude.ai to "audit the SEO on my site", it finds `seo-audit` the same way it finds any other tool, calls it, and gets the SKILL.md back as its playbook.
 
-| Tool | What it returns |
-| --- | --- |
-| `load_skill(name)` | The skill's SKILL.md and a list of its other files. The tool's description is the catalog: every skill name with the first 160 characters of its description. |
-| `read_skill_file(name, path)` | One reference, script, or template file from the skill. |
-| `search_skills(query)` | Keyword matches over names and descriptions. |
+One more tool, `read_skill_file(name, path)`, returns any reference, script, or template file a skill points to. Each skill is also an MCP prompt, so clients with a prompt picker can load one by hand.
 
-Each skill is also an MCP prompt, so clients with a prompt picker can load one by hand.
+The first version had a single `load_skill` tool with the whole catalog packed into its description. claude.ai connected fine but never called it: the model went straight to web fetch. Tool names are what the model matches on, so the catalog moved into the names.
 
 ## How it's built
 

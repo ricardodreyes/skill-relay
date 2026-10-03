@@ -75,6 +75,7 @@ export async function handle(event, store) {
   if (Array.isArray(message)) return json(400, rpcError(null, -32600, 'batches are not supported'));
   if (message.id === undefined) return { statusCode: 202, body: '' };
 
+  console.log(JSON.stringify({ rpc: message.method, tool: message.params?.name }));
   const stored = await store.get(bundleKey(token));
   const skills = stored ? JSON.parse(stored).skills : {};
   return json(200, rpc(message, skills));
@@ -132,38 +133,31 @@ export function rpc({ id, method, params = {} }, skills) {
 }
 
 const INSTRUCTIONS =
-  'Skill Relay serves the user\'s Agent Skills (SKILL.md playbooks). Before starting a task, check the catalog in load_skill. ' +
-  'When a skill matches the task, call load_skill and follow its instructions; call read_skill_file for any file it references.';
+  'Skill Relay serves the user\'s Agent Skills. Each skill is a tool named after it. When a task matches a skill, call that ' +
+  'tool before doing anything else and follow the playbook it returns; call read_skill_file for any file the playbook references.';
 
-function catalog(skills) {
-  const lines = Object.entries(skills).map(([name, s]) => `- ${name}: ${s.description.replace(/\s+/g, ' ').slice(0, 160)}`);
-  return lines.length ? lines.join('\n') : '(no skills pushed yet; run the push command from the Skill Relay page)';
-}
+const READ_FILE = 'read_skill_file';
+const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 
 function tools(skills) {
+  const perSkill = Object.entries(skills)
+    .filter(([name]) => TOOL_NAME.test(name) && name !== READ_FILE)
+    .map(([name, s]) => ({
+      name,
+      description: `${s.description}\n\nCall this tool first for this kind of task. It returns the user's expert playbook (SKILL.md); follow it.`,
+      inputSchema: { type: 'object', properties: {} },
+      annotations: { title: `Skill: ${name}`, readOnlyHint: true },
+    }));
   return [
+    ...perSkill,
     {
-      name: 'load_skill',
-      description:
-        'Load one of the user\'s Agent Skills. Call this BEFORE starting any task that matches a skill below, then follow the ' +
-        `returned SKILL.md as instructions.\n\nAvailable skills:\n${catalog(skills)}`,
-      inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Skill name from the list' } }, required: ['name'] },
-      annotations: { readOnlyHint: true },
-    },
-    {
-      name: 'read_skill_file',
-      description: 'Read a reference, script, or template file bundled with a skill, by the path load_skill listed.',
+      name: READ_FILE,
+      description: 'Read a reference, script, or template file bundled with a skill, by a path the skill listed.',
       inputSchema: {
         type: 'object',
-        properties: { name: { type: 'string' }, path: { type: 'string', description: 'e.g. references/style.md' } },
+        properties: { name: { type: 'string', description: 'Skill name' }, path: { type: 'string', description: 'e.g. references/style.md' } },
         required: ['name', 'path'],
       },
-      annotations: { readOnlyHint: true },
-    },
-    {
-      name: 'search_skills',
-      description: 'Keyword search over skill names and descriptions. Use when no skill in the load_skill list obviously fits.',
-      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
       annotations: { readOnlyHint: true },
     },
   ];
@@ -171,32 +165,19 @@ function tools(skills) {
 
 function skillText(name, skill) {
   const others = Object.keys(skill.files).filter((p) => p !== 'SKILL.md');
-  const listing = others.length ? `\n\n---\nFiles in this skill (read with read_skill_file):\n${others.map((p) => `- ${p}`).join('\n')}` : '';
+  const listing = others.length ? `\n\n---\nFiles in this skill (read with ${READ_FILE}):\n${others.map((p) => `- ${p}`).join('\n')}` : '';
   return `# Skill: ${name}\n\n${skill.files['SKILL.md']}${listing}`;
 }
 
 function callTool(tool, args, skills) {
-  const skill = skills[args.name];
-  switch (tool) {
-    case 'load_skill':
-      return skill ? text(skillText(args.name, skill)) : text(`No skill named "${args.name}". Available: ${Object.keys(skills).join(', ')}`, true);
-    case 'read_skill_file': {
-      if (!skill) return text(`No skill named "${args.name}".`, true);
-      const file = skill.files[args.path];
-      return file === undefined ? text(`No file "${args.path}" in ${args.name}. Files: ${Object.keys(skill.files).join(', ')}`, true) : text(file);
-    }
-    case 'search_skills': {
-      const terms = String(args.query ?? '').toLowerCase().split(/\s+/).filter(Boolean);
-      const hits = Object.entries(skills)
-        .map(([name, s]) => [name, s, terms.filter((t) => `${name} ${s.description}`.toLowerCase().includes(t)).length])
-        .filter(([, , score]) => score > 0)
-        .sort((a, b) => b[2] - a[2])
-        .slice(0, 10);
-      return text(hits.length ? hits.map(([name, s]) => `- ${name}: ${s.description}`).join('\n') : 'No matching skills.');
-    }
-    default:
-      return text(`Unknown tool: ${tool}`, true);
+  if (tool === READ_FILE) {
+    const skill = skills[args.name];
+    if (!skill) return text(`No skill named "${args.name}".`, true);
+    const file = skill.files[args.path];
+    return file === undefined ? text(`No file "${args.path}" in ${args.name}. Files: ${Object.keys(skill.files).join(', ')}`, true) : text(file);
   }
+  const skill = skills[tool];
+  return skill ? text(skillText(tool, skill)) : text(`No skill named "${tool}". Push your skills from the Skill Relay page.`, true);
 }
 
 const LANDING = `<!doctype html>
