@@ -23,6 +23,8 @@ One more tool, `read_skill_file(name, path)`, returns any reference, script, or 
 
 The first version had a single `load_skill` tool with the whole catalog packed into its description. claude.ai connected fine but never called it: the model went straight to web fetch. Tool names are what the model matches on, so the catalog moved into the names.
 
+One claude.ai detail: with many connectors on, claude.ai defaults to "Load tools when needed" and hides connector tools until the model searches for them. A plain "audit my SEO" can skip the search and go to web fetch. Saying "use my skills" (no skill name needed) makes it search, and it picks the right skill from there. Switching Tool access to "Tools already loaded" puts every skill in front of the model from the start.
+
 ## How it's built
 
 ```
