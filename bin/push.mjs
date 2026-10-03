@@ -34,6 +34,11 @@ if (!existsSync(tokenFile)) {
 }
 const token = readFileSync(tokenFile, 'utf8').trim();
 
+if (!existsSync(opts.dir)) {
+  console.error(`No skills folder at ${opts.dir}. Pass --dir to point at yours.`);
+  process.exit(1);
+}
+
 const only = opts.only ? new Set(JSON.parse(readFileSync(opts.only, 'utf8'))) : null;
 const ignoreFile = join(opts.dir, '.relayignore');
 const ignored = new Set(existsSync(ignoreFile) ? readFileSync(ignoreFile, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean) : []);
@@ -110,5 +115,6 @@ if (!res.ok) {
   process.exit(1);
 }
 const { skills: count } = await res.json();
-console.log(`Pushed ${count} skills (${(body.length / 1024).toFixed(0)} KB gzipped).`);
+const size = body.length < 1024 ? `${body.length} bytes` : `${Math.round(body.length / 1024)} KB`;
+console.log(`Pushed ${count} ${count === 1 ? 'skill' : 'skills'} (${size} gzipped).`);
 console.log(`\nConnector URL (keep it private, it is the only key):\n${opts.relay}/t/${token}/mcp`);

@@ -190,14 +190,14 @@ pre{background:#f4f4f5;padding:14px 16px;border-radius:8px;overflow-x:auto;font-
 h2{font-size:18px;margin:36px 0 8px}a{color:#512d8b}footer{margin-top:48px;color:#666;font-size:14px}
 </style></head><body>
 <h1>Skill Relay</h1>
-<p class="lede">Your Claude Code skills live in a folder on one laptop. Skill Relay puts them in every Claude you use: claude.ai on the web, the desktop app, and your phone.</p>
+<p class="lede">Your Claude Code skills live in a folder on one laptop. Skill Relay puts them in claude.ai on the web, the desktop app, and your phone.</p>
 <h2>1. Push your skills</h2>
 <pre>git clone https://github.com/ricardodreyes/skill-relay
 node skill-relay/bin/push.mjs</pre>
-<p>It reads <code>~/.claude/skills</code>, refuses to upload anything that looks like a secret, and prints your private connector URL.</p>
+<p>Needs Node 18 or newer. It reads <code>~/.claude/skills</code>, refuses to upload anything that looks like a secret, and prints your private connector URL.</p>
 <h2>2. Add the connector</h2>
-<p>In claude.ai open Settings, Connectors, Add custom connector, and paste the URL. Your skills now show up as tools. Claude loads one when your task matches it, the same way Claude Code does.</p>
-<h2>3. Push again whenever you edit a skill</h2>
-<p>Every push replaces the last one. Nothing else to sync.</p>
+<p>In claude.ai go to Settings, Connectors, Add custom connector, paste the URL, and leave it on No sign-in. Every skill shows up as its own tool.</p>
+<h2>3. Use them</h2>
+<p>Start a chat with "use my skills to..." and Claude searches your skills and picks the one that fits. Push again whenever you edit a skill; each push replaces the last one.</p>
 <footer>Runs on AWS Lambda and S3. Source: <a href="https://github.com/ricardodreyes/skill-relay">github.com/ricardodreyes/skill-relay</a></footer>
 </body></html>`;
