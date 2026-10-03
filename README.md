@@ -1,58 +1,183 @@
 # Skill Relay
 
-Claude Code skills live in `~/.claude/skills` on one laptop. Claude on the web, the desktop app, and your phone can't see them. Skill Relay is a remote MCP server on AWS that serves your skill folder to any MCP client, so the playbooks you wrote for Claude Code work everywhere you talk to Claude.
+A remote MCP server on AWS Lambda that serves your Claude Code skills to claude.ai on the web, the desktop app, and your phone. One push command uploads your `~/.claude/skills` folder, one connector URL plugs it into Claude, and every skill shows up as its own tool that Claude can find and load on its own.
 
 Live: https://o36lbkqwq54bltwrbozuqluxru0unmqg.lambda-url.us-east-1.on.aws/
 
-## Use it
+## The problem
 
-```sh
+Skills are folders with a SKILL.md that tell Claude how to do one job the way you want it done (an SEO audit, a cold email, a code review). In Claude Code they load automatically when the task matches. But they live on one laptop, so the second you open claude.ai on your phone or the desktop app, they're gone. Same model, none of the playbooks.
+
+claude.ai can take skills as zip uploads, one at a time, and they don't stay in sync with the folder you actually edit. I wanted the folder I already have to just show up everywhere. Push once, use it anywhere.
+
+## Architecture
+
+```
+[~/.claude/skills]
+        |
+        v
+[bin/push.mjs]  walks the folder, follows symlinks,
+        |       skips binaries and files over 200 KB,
+        |       refuses to push anything that looks like a secret
+        |
+   gzip POST /t/<token>/push
+        |
+        v
+[Lambda Function URL] ---------> [S3: tenants/<sha256(token)>/bundle.json]
+        ^                                     |
+        |                                     |
+   JSON-RPC POST /t/<token>/mcp               |
+        |                                     |
+[claude.ai connector] <-- tools/list: 1 tool per skill
+                      <-- tools/call: that skill's SKILL.md
+                      <-- read_skill_file: any file the skill references
+```
+
+**3 AWS pieces**, created by one rerunnable `./deploy.sh`:
+- **Lambda** (Node 22, one file, no npm dependencies) serves the landing page, the push endpoint, and a stateless MCP Streamable HTTP endpoint
+- **S3** holds one JSON bundle per user in a private bucket with all public access blocked; the key is the SHA-256 of the user's token, so the token itself is never stored
+- **IAM**, where the Lambda role can read/write `tenants/*` in that one bucket and nothing else
+
+## Key findings
+
+Measured against the live deployment on 2026-10-02, with a library of 74 public skills:
+
+| Metric | Value |
+|--------|-------|
+| **Skills served** | 74 (367 files, 2.8 MB on disk) |
+| **Bundle after gzip** | 904 KB |
+| **`tools/list` payload** | 49.9 KB, 75 tools |
+| **`tools/call` latency, warm** | p50 489 ms, p95 537 ms (20 runs) |
+| **`tools/list` latency, warm** | p50 639 ms, p95 790 ms (20 runs) |
+| **Cold start (Lambda init)** | about 350 ms |
+| **Skill claude.ai picked** | `seo-audit`, out of 74, from "use my skills to audit the seo of trysignet.dev" |
+
+### What broke on the way
+
+It took 3 tries in claude.ai before Claude actually loaded a skill. Each one taught me something about how claude.ai uses connector tools.
+
+1. **One tool with the catalog in its description got ignored.** v1 had a single `load_skill` tool with every skill name and description packed into its description. claude.ai connected fine and listed the tool, then went straight to web fetch. The model matches on tool names, and `load_skill` says nothing about SEO.
+
+2. **One tool per skill still got skipped, because claude.ai hid them.** v2 turned every skill into its own tool (`seo-audit`, `copywriting`, ...). The Lambda logs showed zero requests during the test chat. With a lot of connectors on, claude.ai defaults to "Load tools when needed", which keeps connector tools hidden until the model goes looking. For a plain "audit the seo" it never looked.
+
+3. **"use my skills" makes it look.** Same server, new prompt: "use my skills to audit the seo of trysignet.dev". Claude searched the connector for "seo audit", got 5 matches back, picked `seo-audit`, and ran the audit off the playbook. The Lambda log shows the call at 03:32:47 UTC.
+
+So the fix was partly server design (names over descriptions) and partly how you ask. Turning Tool access to "Tools already loaded" (the + menu in a chat, then Connectors, then Tool access) skips the search step entirely, though it costs context.
+
+## Screenshots
+
+### Claude searching the connector and finding the skill
+![claude.ai searching skill relay tools](docs/claude-ai-tool-search.png)
+
+### The skill loading in claude.ai
+![claude.ai calling the seo-audit skill](docs/claude-ai-skill-call.png)
+
+### The call landing in the Lambda logs
+![Lambda log showing tools/call seo-audit](docs/lambda-log.png)
+
+### Landing page
+![Skill Relay landing page](docs/landing.png)
+
+## Setup & run
+
+### Prerequisites
+- Node 18 or newer
+- A `~/.claude/skills` folder (anything with a SKILL.md in it)
+
+### Quick start
+
+```bash
 git clone https://github.com/ricardodreyes/skill-relay
 node skill-relay/bin/push.mjs
 ```
 
-The push reads `~/.claude/skills`, refuses to upload any file that looks like a secret (AWS keys, Anthropic and OpenAI keys, GitHub and Slack tokens, private keys), and prints a private connector URL. In claude.ai open Settings, then Connectors, then Add custom connector, and paste it. Push again whenever you edit a skill; each push replaces the last.
-
-Skip a skill by putting its folder name on a line in `~/.claude/skills/.relayignore`. Push only a list with `--only names.json`.
-
-## How Claude picks a skill
-
-Claude Code shows the model every skill's name and description, and the model loads one when the task matches. Skill Relay copies that by making each skill its own MCP tool. The tool's name is the skill's name (`seo-audit`, `copywriting`), and its description is the skill's description. When you ask claude.ai to "audit the SEO on my site", it finds `seo-audit` the same way it finds any other tool, calls it, and gets the SKILL.md back as its playbook.
-
-One more tool, `read_skill_file(name, path)`, returns any reference, script, or template file a skill points to. Each skill is also an MCP prompt, so clients with a prompt picker can load one by hand.
-
-The first version had a single `load_skill` tool with the whole catalog packed into its description. claude.ai connected fine but never called it: the model went straight to web fetch. Tool names are what the model matches on, so the catalog moved into the names.
-
-One claude.ai detail: with many connectors on, claude.ai defaults to "Load tools when needed" and hides connector tools until the model searches for them. A plain "audit my SEO" can skip the search and go to web fetch. Saying "use my skills" (no skill name needed) makes it search, and it picks the right skill from there. Switching Tool access to "Tools already loaded" puts every skill in front of the model from the start.
-
-## How it's built
+That prints something like:
 
 ```
-push.mjs ──gzip POST──▶ Lambda Function URL ──▶ S3  tenants/<sha256(token)>/bundle.json
-claude.ai ──JSON-RPC───▶ Lambda Function URL ──▶ S3  (read)
+Pushed 74 skills (904 KB gzipped).
+
+Connector URL (keep it private, it is the only key):
+https://o36lbkqwq54bltwrbozuqluxru0unmqg.lambda-url.us-east-1.on.aws/t/<your-token>/mcp
 ```
 
-One Lambda function (`lambda/index.mjs`, Node 22, no npm dependencies) serves the landing page, the push endpoint, and a stateless MCP Streamable HTTP endpoint. Each user's skills are one JSON bundle in a private S3 bucket. The bucket key is the SHA-256 of the user's token, so the token itself is never stored. The Lambda role can read and write `tenants/*` in that one bucket and nothing else.
+### Connect it to claude.ai
 
-`deploy.sh` creates or updates the bucket, the role, the function, and the public Function URL. It's safe to rerun.
+1. Go to Settings, Connectors, Add custom connector
+2. Name it, paste the URL, and leave Authentication on **No sign-in**
+3. In a new chat, start with "use my skills to..." and Claude picks the skill
 
-```sh
-./deploy.sh          # prints the Function URL
-node lambda/test.mjs # handler checks against an in-memory store
+### Choose what gets pushed
+
+```bash
+# skip skills: one folder name per line
+echo "my-private-skill" >> ~/.claude/skills/.relayignore
+
+# or push only a list (a JSON array of folder names)
+node skill-relay/bin/push.mjs --only names.json
+
+# or a different folder
+node skill-relay/bin/push.mjs --dir ./my-skills
 ```
 
-## Security model
+Push again any time you edit a skill. Each push replaces the last one, and the token in `~/.skill-relay/token` stays the same, so the connector URL doesn't change.
 
-The token in the URL is the only key: 256 random bits, generated on first push and kept in `~/.skill-relay/token`. Anyone with your connector URL can read your skills, so treat it like a password. Bundles are capped at 20 MB uncompressed.
+### Run your own copy on AWS
 
-## How a coding agent built it
+```bash
+aws sts get-caller-identity          # confirm the account
+./deploy.sh                          # prints your Function URL
+node bin/push.mjs --relay <your Function URL>
+node lambda/test.mjs                 # handler checks, no AWS needed
+```
 
-Claude Code built and shipped this in one evening, with the AWS CLI as its connection to the account. It wrote the handler and its tests first, then `deploy.sh`, ran it, and read the CloudWatch logs when the first live call returned 500. The fix was a missing `s3:ListBucket` grant: without it, S3 reports a missing bundle as AccessDenied instead of NoSuchKey. It then pushed a real skill library and checked the live catalog over curl before the claude.ai test.
+## MCP endpoints
 
-The demo library is 74 skills from public repos (coreyhaines31/marketingskills, firecrawl, heygen-com/hyperframes, vercel-labs/skills, remotion-dev/skills). Each one was checked against the git tree hash recorded at install time, and only exact matches were pushed. `allow.json` is that list.
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Landing page |
+| POST | `/t/<token>/push` | Upload a gzipped skill bundle (cap 20 MB unzipped) |
+| POST | `/t/<token>/mcp` | MCP JSON-RPC: `initialize`, `tools/list`, `tools/call`, `prompts/list`, `prompts/get`, `ping` |
+| GET | `/t/<token>/mcp` | 405, there's no SSE stream since every request is stateless |
+
+| Tool | Returns |
+|------|---------|
+| `<skill-name>` (one per skill) | That skill's SKILL.md, plus a list of its other files |
+| `read_skill_file(name, path)` | One reference, script, or template file from a skill |
+
+Every skill is also an MCP prompt, so clients with a prompt picker can load one by hand.
+
+## Security
+
+The token in the URL is the only key: 256 random bits, made on your first push and saved owner-only at `~/.skill-relay/token`. Anyone with your connector URL can read your skills, so treat it like a password (and crop it out of screenshots). To rotate it, delete that file, push again, and re-add the connector.
+
+The push refuses to upload any file that matches an AWS key, an Anthropic/OpenAI key, a Stripe live key, a GitHub or Slack token, or a private key block.
+
+## How this was built
+
+I built this in one evening with Claude Code connected to my AWS account through the AWS CLI. It wrote the handler and the tests before touching AWS, then `deploy.sh`, then ran it. The first live call 500'd; Claude Code pulled the CloudWatch logs and found the Lambda role was missing `s3:ListBucket` (without it, S3 reports a missing file as AccessDenied instead of NoSuchKey). Then the 3 claude.ai attempts above, each one diagnosed from the Lambda logs.
+
+The demo library is only skills that were already public. I didn't want mine going up. Claude Code compared every installed skill against the git tree hash recorded when it was installed and kept the 74 exact matches from public repos (coreyhaines31/marketingskills, firecrawl, heygen-com/hyperframes, vercel-labs/skills, remotion-dev/skills). 12 had drifted from upstream, so they stayed out. `allow.json` is that list.
 
 ## What I'd do with more time
 
-- OAuth instead of a token in the URL, so the claude.ai connector can be shared across a team without sharing a secret.
-- Team libraries: one bundle many people connect to, with per-person overrides.
-- Push on save, from a Claude Code hook, so the web copy is never stale.
+- **OAuth instead of a token in the URL**, so a team can share one connector without sharing a secret
+- **Team libraries**, one shared bundle with per-person overrides, since every engineer's skills folder drifts right now
+- **Cache the bundle in Lambda memory by ETag**, since every request reads the whole 3 MB bundle from S3 and that's most of the 489 ms
+- **Push on save** from a Claude Code hook, so the web copy is never stale
+- **Rate limiting on push**, since anyone can create a tenant right now
+- **Smaller tool descriptions** for big libraries; 74 skills is already 50 KB of `tools/list`
+
+## Tech stack
+
+| Tool | Purpose |
+|------|---------|
+| AWS Lambda (Node 22) + Function URL | MCP server, push endpoint, landing page |
+| Amazon S3 | One private JSON bundle per user |
+| AWS IAM | Role scoped to one bucket path |
+| Model Context Protocol (Streamable HTTP) | How claude.ai talks to the server |
+| Node 18+ standard library | The push CLI, no dependencies |
+| Claude Code + AWS CLI | Built and deployed it |
+
+## License
+
+MIT
